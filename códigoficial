@@ -1,0 +1,1098 @@
+#!/usr/bin/env python3
+
+# encoding: utf-8
+
+
+
+import serial
+
+import time
+
+import csv
+
+import os
+
+from datetime import datetime
+
+import smtplib
+
+from email.mime.multipart import MIMEMultipart
+
+from email.mime.text import MIMEText
+
+from email.mime.application import MIMEApplication
+
+import matplotlib.pyplot as plt
+
+import statistics
+
+import requests
+
+import json 
+
+
+
+# ----------------------------------------------------------------------
+
+# CONFIGURAÇÕES GERAIS (AJUSTE AQUI)
+
+# ----------------------------------------------------------------------
+
+
+
+# Limites CRÍTICOS e de normalidade
+
+TEMP_CRITICA_MIN = 16.0
+
+TEMP_CRITICA_MAX = 24.0
+
+UMI_CRITICA_MIN = 40.0
+
+UMI_CRITICA_MAX = 60.0
+
+SOM_CRITICO = 50   
+
+LUZ_CRITICA = 300
+
+
+
+TEMP_NORMAL_MIN = 18.0
+
+TEMP_NORMAL_MAX = 22.0
+
+UMI_NORMAL_MIN = 45.0
+
+UMI_NORMAL_MAX = 55.0
+
+SOM_NORMAL_MAX = 100
+
+LUZ_NORMAL_MAX = 150
+
+
+
+
+
+
+
+  
+
+# Porta serial (ajuste conforme seu sistema)
+
+PORTA = "/dev/ttyUSB0"
+
+BAUD = 9600
+
+
+
+# Tempos (segundos) - VALORES ESTÁVEIS E RECOMENDADOS
+
+TEMPO_RELATORIO = 50       # relatório a cada 50 segundos (50 segundos)
+
+TEMPO_ALERTA_SPAM = 50       # intervalo mínimo entre envios de email de alerta (spam guard: 1 minuto)
+
+TEMPO_ALERTA_NTFY = 50       # intervalo mínimo entre notificações NTFY
+
+TEMPO_ERRO_SISTEMA_SPAM = 300 # intervalo mínimo para alertas de erro de sistema (5 minutos)
+
+
+
+# SINAIS DE CONTROLE (CORRIGIDOS COM BASE NOS TESTES)
+
+SINAL_DESATIVACAO_TAG = "Sistema desativado!" 
+
+SINAL_TAG_INVALIDA = "TAG não reconhecida!"   
+
+
+
+# Diretórios e arquivos
+
+BASE_DIR = os.path.expanduser("~/WAKANDA_DATA")
+
+os.makedirs(BASE_DIR, exist_ok=True)
+
+CSV_FILE = os.path.join(BASE_DIR, "historico_wakanda.csv")
+
+GRAFICO_FILE = os.path.join(BASE_DIR, "grafico_monitoramento_completo.png")
+
+
+
+# Configurações de e-mail (Gmail SMTP com app password)
+
+EMAIL_REMETENTE = "fllsesicamacari@gmail.com"
+
+SENHA_APP = "gjvqhyhnnwwhtrpq" # Mantenha sua App Password aqui
+
+DESTINATARIOS = [
+
+    "allifsantos578@gmail.com",
+
+    "alexandretavaresA3@gmail.com", 
+
+    "juliana35jesus@gmail.com",
+
+    "wakandatechtesteprototipo@gmail.com"
+
+]
+
+
+
+# ----------------------------------------------------------------------
+
+# NTFY (Tópico que você estava usando)
+
+# ----------------------------------------------------------------------
+
+NTFY_TOPIC = "smca-alertas"    
+
+NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
+
+
+
+# ----------------------------------------------------------------------
+
+# LISTAS TEMPORÁRIAS (guarda leituras para o relatório)
+
+# ----------------------------------------------------------------------
+
+tempos = []
+
+temperaturas = []
+
+umidades = []
+
+intensidades_sonoras = []
+
+intensidades_luz = []
+
+
+
+# ----------------------------------------------------------------------
+
+# Conexão serial
+
+# ----------------------------------------------------------------------
+
+try:
+
+    arduino = serial.Serial(PORTA, BAUD, timeout=2)
+
+    time.sleep(2)
+
+    print("Conectado ao Arduino!") 
+
+except serial.SerialException as e:
+
+    print(f"Erro na porta {PORTA}: {e}") 
+
+    print("O sistema será encerrado devido à falha de conexão serial.") 
+
+    exit(1)
+
+
+
+# Cria CSV se não existir
+
+if not os.path.exists(CSV_FILE):
+
+    with open(CSV_FILE, "w", newline="") as f:
+
+        writer = csv.writer(f)
+
+        writer.writerow(["DataHora", "Temperatura", "Umidade", "Som", "Luz"])
+
+
+
+# ----------------------------------------------------------------------
+
+# FUNÇÕES AUXILIARES
+
+# ----------------------------------------------------------------------
+
+
+
+def analisar_status_preservacao(nome, valor):
+
+    if nome == "Temperatura":
+
+        if valor < TEMP_CRITICA_MIN or valor > TEMP_CRITICA_MAX:
+
+            return "Critico", "Risco de dano imediato.", f"Temperatura extrema ({valor:.1f}C). Aja imediatamente."
+
+        elif valor < TEMP_NORMAL_MIN or valor > TEMP_NORMAL_MAX:
+
+            return "Atencao", "Valor que acelera deterioracao.", f"Ajuste climatização ({valor:.1f}C)."
+
+        else:
+
+            return "Normalidade", "Condição ideal.", "Manter monitoramento."
+
+
+
+    elif nome == "Umidade":
+
+        if valor < UMI_CRITICA_MIN or valor > UMI_CRITICA_MAX:
+
+            return "Critico", "Risco de mofo/corrosao/rachadura.", f"Umidade extrema ({valor:.1f}%). Aja imediatamente."
+
+        elif valor < UMI_NORMAL_MIN or valor > UMI_NORMAL_MAX:
+
+            return "Atencao", "Risco marginal.", f"Ajuste controle de umidade ({valor:.1f}%)."
+
+        else:
+
+            return "Normalidade", "Equilibrio ideal.", "Manter monitoramento."
+
+
+
+    elif nome == "Som":
+
+        if valor >= SOM_CRITICO:
+
+            return "Critico", "Risco de dano fisico.", f"Som muito alto ({valor}). Intervenha agora."
+
+        elif valor >= SOM_NORMAL_MAX:
+
+            return "Atencao", "Ruído constante prejudicial.", f"Reduza fontes de som ({valor})."
+
+        else:
+
+            return "Normalidade", "Ambiente estavél.", "Manter monitoramento."
+
+
+
+    elif nome == "Luz":
+
+        if valor >= LUZ_CRITICA:
+
+            return "Crìtico", "Fotodegradação imediata.", f"Luz excessiva ({valor}). Bloqueie a fonte."
+
+        elif valor >= LUZ_NORMAL_MAX:
+
+            return "Atenção", "Exposição prolongada perigosa.", f"Reduza iluminação ({valor})."
+
+        else:
+
+            return "Normalidade", "Exposição segura.", "Manter monitoramento."
+
+
+
+    return "Desconhecido", "Parâmetro inválido.", "Nenhuma ação."
+
+
+
+def obter_extremos(dados, tempos_local):
+
+    if not dados:
+
+        return "-", "-"
+
+    valor_max = max(dados)
+
+    valor_min = min(dados)
+
+    try:
+
+        horario_max = tempos_local[dados.index(valor_max)]
+
+        horario_min = tempos_local[dados.index(valor_min)]
+
+    except IndexError:
+
+        horario_max = 'N/A'
+
+        horario_min = 'N/A'
+
+    return f"{valor_max:.1f} ({horario_max})", f"{valor_min:.1f} ({horario_min})"
+
+
+
+
+
+# ------------------ NTFY ------------------
+
+def enviar_ntfy(titulo, mensagem):
+
+    try:
+
+        headers = {"Title": titulo}
+
+        
+
+        response = requests.post(
+
+            NTFY_URL, 
+
+            data=mensagem.encode('utf-8'), 
+
+            headers=headers,
+
+            timeout=8
+
+        )
+
+        if response.status_code == 200:
+
+            print(f"Notificacao enviada NTFY: {titulo}")
+
+        else:
+
+            print(f"Falha NTFY: Status {response.status_code}. Mensagem de erro: {response.text}")
+
+
+
+    except Exception as e:
+
+        print("Erro ao enviar notificacao ntfy:", e)
+
+
+
+
+
+# ------------------ EMAIL ------------------
+
+def enviar_email_assunto_corpo_anexo(assunto, corpo_html, anexos_paths=None):
+
+    try:
+
+        msg = MIMEMultipart()
+
+        msg["From"] = EMAIL_REMETENTE
+
+        msg["Subject"] = assunto
+
+        msg.attach(MIMEText(corpo_html, 'html'))
+
+
+
+        if anexos_paths:
+
+            for path in anexos_paths:
+
+                if os.path.exists(path):
+
+                    with open(path, "rb") as f:
+
+                        ext = os.path.splitext(path)[1].lstrip('.')
+
+                        subtype = ext if ext in ['png', 'csv'] else 'octet-stream'
+
+                        attach = MIMEApplication(f.read(), _subtype=subtype)
+
+                        attach.add_header('Content-Disposition', 'attachment', filename=os.path.basename(path))
+
+                        msg.attach(attach)
+
+
+
+        servidor = smtplib.SMTP("smtp.gmail.com", 587)
+
+        servidor.starttls()
+
+        servidor.login(EMAIL_REMETENTE, SENHA_APP)
+
+
+
+        msg["To"] = ", ".join(DESTINATARIOS)
+
+        
+
+        servidor.sendmail(EMAIL_REMETENTE, DESTINATARIOS, msg.as_string())
+
+
+
+        servidor.quit()
+
+        print("E-mails enviados com sucesso!")
+
+        return True
+
+
+
+    except Exception as e:
+
+        print("Erro ao enviar e-mail:", e)
+
+        return False
+
+
+
+
+
+# ------------------ ALERTA DE SISTEMA ------------------
+
+def enviar_alerta_sistema(tipo_alerta, detalhes):
+
+    
+
+    global ultimo_erro_sistema
+
+    agora = time.time()
+
+    
+
+    if "FALHA NO SISTEMA" in tipo_alerta and agora - ultimo_erro_sistema < TEMPO_ERRO_SISTEMA_SPAM:
+
+        print(f"Alerta de sistema '{tipo_alerta}' bloqueado por spam guard.")
+
+        return
+
+        
+
+    data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    
+
+    if "ACESSO NÃO AUTORIZADO" in tipo_alerta:
+
+        cor_header = "#CC0000" 
+
+        assunto_prefixo = "ALERTA"
+
+    elif "DESATIVAÇÃO POR TAG" in tipo_alerta:
+
+        cor_header = "#008000" 
+
+        assunto_prefixo = "SUCESSO"
+
+    elif "FALHA NO SISTEMA" in tipo_alerta:
+
+        cor_header = "#FFD700" 
+
+        assunto_prefixo = "FALHA"
+
+        ultimo_erro_sistema = agora 
+
+    else: 
+
+        cor_header = "#4B0082" 
+
+        assunto_prefixo = "AVISO"
+
+
+
+    assunto = f"{assunto_prefixo} DE SISTEMA - {tipo_alerta}"
+
+    
+
+    corpo_html = f"""
+
+    <html>
+
+    <body>
+
+    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse: collapse;">
+
+        <tr>
+
+            <td style="padding: 15px; border: 2px solid {cor_header}; border-radius: 8px;">
+
+                <h2 style="color: {cor_header}; font-size: 1.5em; margin-top: 0;">{tipo_alerta}</h2>
+
+                <p style="font-weight: bold; color: #333333;">
+
+                    Data e Hora: <span style="color: #333333;">{data_hora}</span>
+
+                </p>
+
+                <hr style="border-top: 1px solid #CCCCCC;">
+
+                <p style="font-size: 1.1em; color: #333333;">{detalhes}</p>
+
+            </td>
+
+        </tr>
+
+    </table>
+
+    </body>
+
+    </html>
+
+    """
+
+    enviar_email_assunto_corpo_anexo(assunto, corpo_html, anexos_paths=None)
+
+    
+
+    enviar_ntfy(assunto, detalhes)
+
+
+
+
+
+# ------------------ RELATÓRIO + GRÁFICO ------------------
+
+def gerar_grafico_e_enviar_relatorio(dados_atuais):
+
+    if len(tempos) < 2:
+
+        print("Dados insuficientes para relatório.")
+
+        return
+
+
+
+    try:
+
+        # Geração do Gráfico 
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+
+        
+
+        ax1.plot(tempos, temperaturas, marker='o', label="Temperatura")
+
+        ax1.plot(tempos, umidades, marker='x', label="Umidade")
+
+        ax1.set_title(f"Monitoramento: {len(tempos) * 2} Segundos")
+
+        ax1.grid(True)
+
+        ax1.legend()
+
+
+
+        ax2.plot(tempos, intensidades_sonoras, marker='s', label="Som")
+
+        ax2.plot(tempos, intensidades_luz, marker='d', label="Luz")
+
+        ax2.grid(True)
+
+        ax2.legend()
+
+
+
+        plt.xticks(rotation=45)
+
+        plt.tight_layout()
+
+        plt.savefig(GRAFICO_FILE)
+
+        plt.close()
+
+
+
+        print(f"Grafico salvo: {GRAFICO_FILE}")
+
+
+
+    except Exception as e:
+
+        print("Erro ao gerar gráfico:", e)
+
+
+
+    parametros = [
+
+        ("Temperatura", dados_atuais[0], temperaturas),
+
+        ("Umidade", dados_atuais[1], umidades),
+
+        ("Som", dados_atuais[2], intensidades_sonoras),
+
+        ("Luz", dados_atuais[3], intensidades_luz)
+
+    ]
+
+
+
+    tabela_preservacao = ""
+
+    status_critico = False
+
+    
+
+    status_cores = {"Critico": "#CC0000", "Atenção": "#FFD700", "Normalidade": "#008000"}
+
+
+
+    for nome, valor, hist in parametros:
+
+        status, atencao, acao = analisar_status_preservacao(nome, valor)
+
+        mx, mn = obter_extremos(hist, tempos)
+
+        cor = status_cores.get(status, "#000000")
+
+
+
+        tabela_preservacao += f"""
+
+        <tr>
+
+            <td style="font-weight: bold; color: #333333;">{nome}</td>
+
+            <td style="color:{cor}; font-weight: bold;">{status}</td>
+
+            <td>{valor}</td>
+
+            <td>{mx}</td>
+
+            <td>{mn}</td>
+
+            <td>{atencao}</td>
+
+            <td style="font-weight: bold; color: {cor};">{acao}</td>
+
+        </tr>
+
+        """
+
+
+
+        if "Critico" in status or "Atenção" in status:
+
+            status_critico = True
+
+
+
+    data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    assunto_status = "RISCO DETECTADO" if status_critico else "Normalidade"
+
+    cor_assunto = "#CC0000" if status_critico else "#008000"
+
+
+
+    # HTML OTIMIZADO PARA RELATÓRIO 
+
+    html = f"""
+
+    <html>
+
+    <body>
+
+        <h2 style="color: {cor_assunto};">Relatório de Monitoramento - {assunto_status}</h2>
+
+        <p>Periodo: <strong>{len(tempos) * 2} Segundos</strong></p>
+
+        <p>Gerado em: <strong>{data_hora}</strong></p>
+
+        
+
+        <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; border-color: #CCCCCC;">
+
+            <thead>
+
+                <tr>
+
+                    <th style="background-color: #333333; color: white;">Parâmetro</th>
+
+                    <th style="background-color: #333333; color: white;">Status</th>
+
+                    <th style="background-color: #333333; color: white;">Atual</th>
+
+                    <th style="background-color: #333333; color: white;">Máximo (Hora)</th>
+
+                    <th style="background-color: #333333; color: white;">Mínimo (Hora)</th>
+
+                    <th style="background-color: #333333; color: white;">Atenção</th>
+
+                    <th style="background-color: #333333; color: white;">Ação</th>
+
+                </tr>
+
+            </thead>
+
+            <tbody>
+
+                {tabela_preservacao}
+
+            </tbody>
+
+        </table>
+
+        <p style="margin-top: 20px; font-style: italic; color: #666666;">Dados Históricos e Grafico Completo anexados.</p>
+
+    </body>
+
+    </html>
+
+    """
+
+
+
+    enviar_email_assunto_corpo_anexo(
+
+        f"Relatório Preservação - {assunto_status}",
+
+        html,
+
+        anexos_paths=[GRAFICO_FILE, CSV_FILE]
+
+    )
+
+
+
+    if status_critico:
+
+        enviar_ntfy("Risco Detectado", "Um ou mais parâmetros estao fora do ideal. Verifique o email com o relatorio e gráfico.")
+
+    else:
+
+        enviar_ntfy("Relatorio Enviado", "Condição estável. Relatório e gráfico anexados no email.")
+
+
+
+
+
+# ------------------ ALERTAS IMEDIATOS ------------------
+
+ultimo_alerta_email = 0
+
+ultimo_alerta_ntfy = 0
+
+
+
+def enviar_alerta(dados_atuais):
+
+    global ultimo_alerta_email, ultimo_alerta_ntfy
+
+    agora = time.time()
+
+    temp, umi, som, luz = dados_atuais
+
+
+
+    criticos = []
+
+    
+
+    # 🚨 DEBUG: Imprime os valores que a função está recebendo 🚨
+
+    print(f"DEBUG ALERTA: T:{temp}, U:{umi}, S:{som}, L:{luz}")
+
+
+
+    for nome, valor in [
+
+        ("Temperatura", temp),
+
+        ("Umidade", umi),
+
+        ("Som", som),
+
+        ("Luz", luz)
+
+    ]:
+
+        status, atencao, acao = analisar_status_preservacao(nome, valor)
+
+        if "Critico" in status or "Atencao" in status:
+
+            criticos.append((nome, valor, status, acao))
+
+
+
+    if not criticos:
+
+        return False
+
+
+
+    data_hora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    
+
+    param_texto = {"Temperatura": "Temperatura", "Umidade": "Umidade", "Som": "Som", "Luz": "Luz"}
+
+    
+
+    itens = "".join([
+
+        f"""
+
+        <li style="margin-bottom: 8px;">
+
+            <strong style="color: #333333;">{param_texto.get(c[0], '')}</strong>: 
+
+            <span style="color: #CC0000; font-weight: bold;">{c[2]} ({c[1]})</span>
+
+            — <em>{c[3]}</em>
+
+        </li>
+
+        """
+
+        for c in criticos
+
+    ])
+
+
+
+    corpo = f"""
+
+    <html>
+
+    <body>
+
+    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse: collapse;">
+
+        <tr>
+
+            <td style="padding: 15px; border: 3px solid #CC0000; border-radius: 10px; background-color: #FFF0F0;">
+
+                <h2 style="color:#CC0000; font-size: 1.6em; margin-top: 0;">ALERTA IMEDIATO: PARAMETRO CRITICO</h2>
+
+                <p style="font-weight: bold; color: #333333;">Horario: {data_hora}</p>
+
+                <hr style="border-top: 1px dashed #CC0000;">
+
+                <p style="font-size: 1.1em; font-weight: bold; color: #333333;">Parametros em Risco:</p>
+
+                <ul style="list-style-type: none; padding-left: 0;">{itens}</ul>
+
+                <p style="color: #CC0000; font-weight: bold;">Aja imediatamente para evitar danos!</p>
+
+            </td>
+
+        </tr>
+
+    </table>
+
+    </body>
+
+    </html>
+
+    """
+
+    
+
+    if agora - ultimo_alerta_email >= TEMPO_ALERTA_SPAM:
+
+        enviar_email_assunto_corpo_anexo("ALERTA IMEDIATO: Parâmetro Crítico", corpo)
+
+        ultimo_alerta_email = agora
+
+
+
+    if agora - ultimo_alerta_ntfy >= TEMPO_ALERTA_NTFY:
+
+        nomes = ", ".join([c[0] for c in criticos])
+
+        enviar_ntfy(f"CRITICO: {nomes} FORA DO LIMITE", f"Problemas detectados em: {nomes}. Verifique o email para detalhes da ação.")
+
+        ultimo_alerta_ntfy = agora
+
+
+
+    # Retorna True se algum alerta foi gerado
+
+    return True
+
+
+
+
+
+# ----------------------------------------------------------------------
+
+# LOOP PRINCIPAL 
+
+# ----------------------------------------------------------------------
+
+ultimo_relatorio = time.time()
+
+ultimo_erro_sistema = 0
+
+
+
+print("Iniciando monitoramento...")
+
+
+
+while True:
+
+    try:
+
+        # Lê a linha da porta serial
+
+        linha_bruta = arduino.readline().decode(errors="ignore")
+
+        linha = linha_bruta.strip() 
+
+
+
+        if not linha:
+
+            continue
+
+        
+
+        # DEBUG: Imprima TODAS as linhas lidas para ver se a TAG aparece
+
+        print(f"DEBUG - Linha Serial Bruta: '{linha_bruta}' | Limpa: '{linha}'")
+
+        
+
+        # 1A. 🚨 CHECAGEM DE TAG INVÁLIDA (ACESSO NÃO AUTORIZADO)
+
+        if SINAL_TAG_INVALIDA in linha:
+
+            print(f"ALERTA DE INTRUSÃO DETECTADO! String: {linha}")
+
+            
+
+            mensagem_seguranca = "Foi detectada a tentativa de desativação do sistema com uma TAG não cadastrada."
+
+            
+
+            enviar_alerta_sistema(
+
+                "TENTATIVA DE ACESSO NÂO AUTORIZADO (TAG INVALIDA)", 
+
+                mensagem_seguranca
+
+            )
+
+            continue 
+
+            
+
+        # 1B. ✅ CHECAGEM DO ALERTA DE DESATIVAÇÃO POR TAG VÁLIDA
+
+        if SINAL_DESATIVACAO_TAG in linha:
+
+            print(f"SUCESSO! DESATIVAÇÃO POR TAG VÁLIDA! String: {linha}")
+
+            enviar_alerta_sistema(
+
+                "DESATIVAÇÂO POR TAG", 
+
+                "O sistema de monitoramento foi desativado por aproximação da TAG RFID válida."
+
+            )
+
+            continue 
+
+
+
+        # 2. PROCURAR DADOS DE SENSOR (T,U,S,L)
+
+        partes = linha.split(",")
+
+        
+
+        if len(partes) != 4:
+
+            continue 
+
+        
+
+        try:
+
+            temp = float(partes[0])
+
+            umi = float(partes[1])
+
+            som = int(float(partes[2]))
+
+            luz = int(float(partes[3]))
+
+        
+
+        except ValueError:
+
+            print(f"Valores não-numéricos detectados na linha: {linha}")
+
+            continue
+
+
+
+        dados = (temp, umi, som, luz)
+
+        hora = datetime.now().strftime("%H:%M:%S")
+
+
+
+        print(f"[{hora}] T: {temp:.1f}C | U: {umi:.1f}% | S: {som} | L: {luz}")
+
+
+
+        temperaturas.append(temp)
+
+        umidades.append(umi)
+
+        intensidades_sonoras.append(som)
+
+        intensidades_luz.append(luz)
+
+        tempos.append(hora)
+
+
+
+        with open(CSV_FILE, "a", newline="") as f:
+
+            writer = csv.writer(f)
+
+            writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), temp, umi, som, luz])
+
+
+
+        # AVALIA E ENVIA ALERTA 
+
+        alerta_disparado = enviar_alerta(dados)
+
+        if alerta_disparado:
+
+            print("DEBUG ALERTA: A FUNÇÃO ENVIAR_ALERTA RETORNOU TRUE! (DEVE TER ENVIADO O EMAIL)")
+
+        else:
+
+            print("DEBUG ALERTA: A FUNÇÃO ENVIAR_ALERTA RETORNOU FALSE (DADOS NORMAIS)")
+
+
+
+        # GERA E ENVIA RELATÓRIO (RESPEITANDO TEMPO_RELATORIO de 600s)
+
+        if time.time() - ultimo_relatorio >= TEMPO_RELATORIO:
+
+            gerar_grafico_e_enviar_relatorio(dados)
+
+            temperaturas.clear()
+
+            umidades.clear()
+
+            intensidades_sonoras.clear()
+
+            intensidades_luz.clear()
+
+            tempos.clear()
+
+            ultimo_relatorio = time.time()
+
+
+
+    except KeyboardInterrupt:
+
+        print("\nSistema encerrado manualmente.")
+
+        enviar_alerta_sistema("DESLIGAMENTO MANUAL", "O sistema foi desligado pelo usuario. O Alerta foi enviado IMEDIATAMENTE.")
+
+        break
+
+
+
+    except Exception as erro:
+
+        agora = time.time()
+
+        mensagem = f"Erro no loop principal: {erro}"
+
+
+
+        if agora - ultimo_erro_sistema >= TEMPO_ERRO_SISTEMA_SPAM:
+
+            enviar_alerta_sistema("FALHA NO SISTEMA", mensagem)
+
+            ultimo_erro_sistema = agora
+
+        
+
+        print("Erro:", erro)
+
+
+
+        time.sleep(2)
+
+
+        
